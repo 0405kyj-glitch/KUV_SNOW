@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 app = Flask(__name__)
 
 # [기상청 API 설정]
-AUTH_KEY = "6cM_QKR5T2KDP0CkeU9i-w"
+AUTH_KEY = 
 STATION_MAP = {
     'gunsan': '140',
     'gunsansandan': '886'
