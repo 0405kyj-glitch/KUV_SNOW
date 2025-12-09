@@ -2,19 +2,17 @@ from flask import Flask, render_template_string, request, jsonify
 import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-import urllib3
+# import urllib3 # SSL 우회 설정 제거
 
-# SSL 인증서 경고 무시 설정 유지
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # 제거
 
 app = Flask(__name__)
 
 # [기상청 API 설정]
 AUTH_KEY = "6cM_QKR5T2KDP0CkeU9i-w"
-# 두 지점을 순서대로 정의 (140: 군산, 886: 군산산단)
 TARGET_STATIONS = ['140', '886'] 
 
-# HTML/JavaScript 템플릿 (로딩바, 버튼 기반 조회 기능 포함)
+# HTML/JavaScript 템플릿
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -29,6 +27,13 @@ HTML_TEMPLATE = """
         th { background-color: #007bff; color: white; font-weight: 600; }
         tr:nth-child(even) { background-color: #f8f8f8; }
         tr:hover { background-color: #e9f5ff; }
+        /* [수정] 지점별 구분을 위한 스타일 */
+        tr.group-separator td { 
+            border-top: 3px solid #dc3545; /* 구분선을 더 명확한 색상으로 */
+            padding: 2px;
+            background-color: #fcebeb;
+        }
+        
         .header { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
         h1 { color: #007bff; margin-top: 0; font-size: 24px; }
         p { color: #666; }
@@ -91,7 +96,6 @@ HTML_TEMPLATE = """
             spinner.style.display = 'block'; // 로딩바 표시
 
             try {
-                // Flask API 엔드포인트 호출
                 const response = await fetch(`/api/snow?date=${yyyymmdd}`);
                 const data = await response.json();
 
@@ -118,25 +122,24 @@ HTML_TEMPLATE = """
                         <tbody>
                 `;
                 
-                // 데이터 그룹화 및 순서 조정 (140, 886 붙여서 출력)
-                for (let i = 0; i < data.length; i += 2) {
-                    const row140 = data[i]; // 군산 (140)
-                    const row886 = data[i+1]; // 군산산단 (886)
-                    
-                    if (row140.hour === row886.hour) {
-                        // 군산 140 출력
-                        tableHTML += `
-                            <tr>
-                                <td>${row140.hour}:00</td><td>${row140.name}</td><td>${row140.tot}</td><td>${row140.day}</td>
-                            </tr>
-                        `;
-                        // 군산산단 886 출력
-                        tableHTML += `
-                            <tr>
-                                <td>${row886.hour}:00</td><td>${row886.name}</td><td>${row886.tot}</td><td>${row886.day}</td>
-                            </tr>
-                        `;
+                let previousName = null; // 지점 이름 추적을 위한 변수
+                
+                // 데이터 그룹화 및 순서 조정
+                for (let i = 0; i < data.length; i++) {
+                    const row = data[i];
+
+                    // [수정] 지점 이름이 바뀔 때 시각적 구분선 추가
+                    if (previousName && previousName !== row.name) {
+                        tableHTML += `<tr class="group-separator"><td colspan="4"></td></tr>`;
                     }
+                    
+                    tableHTML += `
+                        <tr>
+                            <td>${row.hour}:00</td><td>${row.name}</td><td>${row.tot}</td><td>${row.day}</td>
+                        </tr>
+                    `;
+                    
+                    previousName = row.name;
                 }
 
                 tableHTML += `
@@ -151,25 +154,22 @@ HTML_TEMPLATE = """
                 resultsArea.innerHTML = `<div class="no-data">데이터를 불러오는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.</div>`;
             }
         }
-        
-        // 페이지 로드 시 자동 조회 방지 (버튼 클릭 기반으로 전환)
-        // window.onload = fetchData;
     </script>
 </body>
 </html>
 """
 
-# [개선된] API 통신 함수: 두 지점의 데이터를 한 번의 API 요청으로 처리
+# API 통신 함수: SSL 인증서 검증 활성화 (verify=False 제거)
 def fetch_data_for_time(tm, sd):
     url = f"https://apihub.kma.go.kr/api/typ01/url/kma_snow1.php?sd={sd}&tm={tm}&help=0&authKey={AUTH_KEY}"
     res_data = {stn: '-' for stn in TARGET_STATIONS}
     
-    REQUEST_TIMEOUT = 5 # 넉넉하게 5초로 설정
+    REQUEST_TIMEOUT = 5 
     
     try:
-        # verify=False로 SSL 오류 방지
-        response = requests.get(url, timeout=REQUEST_TIMEOUT, verify=False)
-        response.raise_for_status() # HTTP 오류 시 예외 발생
+        # [수정] verify=False 옵션 제거 -> SSL 인증서 검증 활성화
+        response = requests.get(url, timeout=REQUEST_TIMEOUT) 
+        response.raise_for_status()
         
         data = response.text
         
@@ -178,11 +178,9 @@ def fetch_data_for_time(tm, sd):
                 parts = line.split(',')
                 stn = parts[1].strip()
                 if stn in TARGET_STATIONS: 
-                    # 데이터는 끝에서 두 번째 필드
                     res_data[stn] = parts[-2].strip()
                     
     except requests.exceptions.RequestException as e:
-        # 타임아웃, 연결 오류, HTTP 오류 등 발생 시 모든 값 '-' 처리
         print(f"API Request failed for {tm}, {sd}: {e}")
         pass
         
@@ -207,61 +205,55 @@ def get_snow_data():
     today_str = now.strftime("%Y%m%d")
     
     try:
-        # 요청된 날짜가 오늘 날짜인 경우, 현재 시간까지만 조회
         end_hour = now.hour if target_date == today_str else 23
         hours = [f"{target_date}{h:02d}00" for h in range(end_hour + 1)]
     except ValueError:
         return jsonify({'error': '유효하지 않은 날짜 형식입니다.'}), 400
 
-    # 병렬 처리: 총적설(tot)과 신적설(day) 데이터를 한 번에 가져오기
-    results = {}
-    
-    # 24시간 전체 요청 시간 목록을 [time, time, ... ] 형태에서 [(time, 'tot'), (time, 'day'), ...] 형태로 확장
+    # 병렬 처리용 매개변수 목록 생성
     task_params = []
     for h in hours:
         task_params.append((h, 'tot'))
         task_params.append((h, 'day'))
     
-    # [성능 개선] API 요청 횟수를 줄이는 방식이므로, 워커 수는 4개 (Render의 CPU 코어 수)로 유지
-    with ThreadPoolExecutor(max_workers=4) as exec:
-        # 각 시간에 대해 tot, day 데이터를 병렬 요청
+    # 워커 수 8개 유지 (성능 최적화)
+    with ThreadPoolExecutor(max_workers=8) as exec:
         responses = list(exec.map(lambda p: (p[0], p[1], fetch_data_for_time(p[0], p[1])), task_params))
         
     # 결과를 시간(tm)과 지점(stn)별로 정리
     combined_data = {}
     for tm, sd, res_data in responses:
         if tm not in combined_data:
-            combined_data[tm] = {'140': {'tot': '-', 'day': '-'}, '886': {'tot': '-', 'day': '-'}}
+            combined_data[tm] = {'140': {'tot': '-', 'day': '-'}, '886': {'tot': '-', 'day': '-'}} 
             
         for stn, val in res_data.items():
             combined_data[tm][stn][sd] = val
 
     final_results = []
-    
-    # 데이터 정렬: 시간 순서로, 같은 시간 내에서는 140, 886 순서로 정렬
     sorted_times = sorted(combined_data.keys())
     
+    # 1. 군산 (140) 데이터 수집 (시간 순으로 정렬)
     for tm in sorted_times:
         hour = tm[8:10]
         data_by_stn = combined_data[tm]
         
-        # 140 (군산) 데이터 추가
         final_results.append({
             'hour': hour,
-            'name': '군산',
+            'name': '군산', # 140
             'tot': data_by_stn['140']['tot'],
             'day': data_by_stn['140']['day']
         })
+
+    # 2. 군산산단 (886) 데이터 수집 (시간 순으로 정렬)
+    for tm in sorted_times:
+        hour = tm[8:10]
+        data_by_stn = combined_data[tm]
         
-        # 886 (군산산단) 데이터 추가
         final_results.append({
             'hour': hour,
-            'name': '군산산단',
+            'name': '군산산단', # 886
             'tot': data_by_stn['886']['tot'],
             'day': data_by_stn['886']['day']
         })
     
     return jsonify(final_results)
-
-# if __name__ == '__main__':
-#     app.run(debug=True)
