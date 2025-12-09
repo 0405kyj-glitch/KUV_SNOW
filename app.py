@@ -2,9 +2,9 @@ from flask import Flask, render_template_string, request, jsonify
 import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-# import urllib3 # SSL 우회 설정 제거
-
-# urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # 제거
+# SSL 인증서 우회 설정을 제거했으므로 urllib3 관련 코드는 주석 처리 또는 제거합니다.
+# import urllib3 
+# urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) 
 
 app = Flask(__name__)
 
@@ -12,7 +12,7 @@ app = Flask(__name__)
 AUTH_KEY = "6cM_QKR5T2KDP0CkeU9i-w"
 TARGET_STATIONS = ['140', '886'] 
 
-# HTML/JavaScript 템플릿
+# HTML/JavaScript 템플릿 (UI/UX 개선 및 그룹별 출력)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -27,7 +27,7 @@ HTML_TEMPLATE = """
         th { background-color: #007bff; color: white; font-weight: 600; }
         tr:nth-child(even) { background-color: #f8f8f8; }
         tr:hover { background-color: #e9f5ff; }
-        /* [수정] 지점별 구분을 위한 스타일 */
+        /* 지점별 구분을 위한 스타일 */
         tr.group-separator td { 
             border-top: 3px solid #dc3545; /* 구분선을 더 명확한 색상으로 */
             padding: 2px;
@@ -122,13 +122,13 @@ HTML_TEMPLATE = """
                         <tbody>
                 `;
                 
-                let previousName = null; // 지점 이름 추적을 위한 변수
+                let previousName = null; 
                 
                 // 데이터 그룹화 및 순서 조정
                 for (let i = 0; i < data.length; i++) {
                     const row = data[i];
 
-                    // [수정] 지점 이름이 바뀔 때 시각적 구분선 추가
+                    // 지점 이름이 바뀔 때 시각적 구분선 추가
                     if (previousName && previousName !== row.name) {
                         tableHTML += `<tr class="group-separator"><td colspan="4"></td></tr>`;
                     }
@@ -164,10 +164,10 @@ def fetch_data_for_time(tm, sd):
     url = f"https://apihub.kma.go.kr/api/typ01/url/kma_snow1.php?sd={sd}&tm={tm}&help=0&authKey={AUTH_KEY}"
     res_data = {stn: '-' for stn in TARGET_STATIONS}
     
-    REQUEST_TIMEOUT = 5 
+    REQUEST_TIMEOUT = 5 # API 타임아웃 5초 유지
     
     try:
-        # [수정] verify=False 옵션 제거 -> SSL 인증서 검증 활성화
+        # SSL 인증서 검증 활성화
         response = requests.get(url, timeout=REQUEST_TIMEOUT) 
         response.raise_for_status()
         
@@ -210,17 +210,15 @@ def get_snow_data():
     except ValueError:
         return jsonify({'error': '유효하지 않은 날짜 형식입니다.'}), 400
 
-    # 병렬 처리용 매개변수 목록 생성
     task_params = []
     for h in hours:
         task_params.append((h, 'tot'))
         task_params.append((h, 'day'))
     
-    # 워커 수 8개 유지 (성능 최적화)
-    with ThreadPoolExecutor(max_workers=8) as exec:
+    # [수정] 워커 수를 2개로 줄여 메모리 사용량 최소화 및 Gunicorn 설정과 일치
+    with ThreadPoolExecutor(max_workers=2) as exec:
         responses = list(exec.map(lambda p: (p[0], p[1], fetch_data_for_time(p[0], p[1])), task_params))
         
-    # 결과를 시간(tm)과 지점(stn)별로 정리
     combined_data = {}
     for tm, sd, res_data in responses:
         if tm not in combined_data:
