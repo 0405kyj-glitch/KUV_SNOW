@@ -164,7 +164,7 @@ def fetch_data_for_time(tm, sd):
     url = f"https://apihub.kma.go.kr/api/typ01/url/kma_snow1.php?sd={sd}&tm={tm}&help=0&authKey={AUTH_KEY}"
     res_data = {stn: '-' for stn in TARGET_STATIONS}
     
-    REQUEST_TIMEOUT = 5 # API 타임아웃 5초 유지
+    REQUEST_TIMEOUT = 10 # API 타임아웃 5초 유지
     
     try:
         # SSL 인증서 검증 활성화
