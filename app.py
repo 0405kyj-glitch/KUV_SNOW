@@ -1,20 +1,20 @@
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, jsonify
 import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-
-# HTTP 요청 시 인증서 검증 경고를 방지 (Render 환경에서는 필요 없을 수 있으나 안전을 위해 포함)
 import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# SSL 인증서 경고 무시 설정 유지
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
 # [기상청 API 설정]
-AUTH_KEY = "6cM_QKR5T2KDP0CkeU9i-w" # 사용자님의 인증키를 그대로 사용
-TARGET_STATIONS = ['140', '886']
+AUTH_KEY = "6cM_QKR5T2KDP0CkeU9i-w"
+# 두 지점을 순서대로 정의 (140: 군산, 886: 군산산단)
+TARGET_STATIONS = ['140', '886'] 
 
-# HTML 디자인 (직관적인 UI)
+# HTML/JavaScript 템플릿 (로딩바, 버튼 기반 조회 기능 포함)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -32,11 +32,27 @@ HTML_TEMPLATE = """
         .header { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
         h1 { color: #007bff; margin-top: 0; font-size: 24px; }
         p { color: #666; }
-        form { margin-top: 15px; display: flex; gap: 10px; align-items: center; }
-        input[type="text"] { padding: 10px; border: 1px solid #ccc; border-radius: 4px; flex-grow: 1; }
+        #controls { margin-top: 15px; display: flex; gap: 10px; align-items: center; }
+        input[type="date"] { padding: 10px; border: 1px solid #ccc; border-radius: 4px; flex-grow: 1; }
         button { padding: 10px 15px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.3s; }
         button:hover { background-color: #218838; }
         .no-data { text-align: center; color: #dc3545; margin-top: 30px; font-size: 1.1em; font-weight: bold; }
+        
+        /* 로딩 스피너 디자인 */
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+            display: none; /* 초기에는 숨김 */
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -44,103 +60,208 @@ HTML_TEMPLATE = """
         <div class="header">
             <h1>❄️ 군산 지역 적설 데이터 조회</h1>
             <p>제작자: 군산공항 김영진</p>
-            <form method="get">
-                조회 날짜 (YYYYMMDD): <input type="text" name="date" placeholder="YYYYMMDD" value="{{ today }}">
-                <button type="submit">조회하기</button>
-            </form>
-        </div>
-        {% if results %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>시간</th><th>지역</th><th>총 쌓인 눈 (cm)</th><th>새로 내린 눈 (cm)</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for row in results %}
-                    <tr>
-                        <td>{{ row.hour }}:00</td><td>{{ row.name }}</td><td>{{ row.tot }}</td><td>{{ row.day }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        {% else %}
-            <div class="no-data">
-                데이터를 불러오지 못했거나, 해당 날짜의 데이터가 없습니다.
+            <div id="controls">
+                조회 날짜: <input type="date" id="targetDate" max="{{ today }}" value="{{ today }}">
+                <button onclick="fetchData()">조회하기</button>
             </div>
-        {% endif %}
+        </div>
+        
+        <div id="loadingSpinner" class="spinner"></div>
+        <div id="resultsArea">
+            </div>
+
     </div>
+
+    <script>
+        const today = new Date().toISOString().split('T')[0];
+        document.getElementById('targetDate').value = today;
+
+        async function fetchData() {
+            const dateInput = document.getElementById('targetDate').value;
+            if (!dateInput) {
+                alert('조회 날짜를 선택해 주세요.');
+                return;
+            }
+
+            const yyyymmdd = dateInput.replace(/-/g, '');
+            const resultsArea = document.getElementById('resultsArea');
+            const spinner = document.getElementById('loadingSpinner');
+
+            resultsArea.innerHTML = '';
+            spinner.style.display = 'block'; // 로딩바 표시
+
+            try {
+                // Flask API 엔드포인트 호출
+                const response = await fetch(`/api/snow?date=${yyyymmdd}`);
+                const data = await response.json();
+
+                spinner.style.display = 'none'; // 로딩바 숨김
+
+                if (data.error) {
+                    resultsArea.innerHTML = `<div class="no-data">${data.error}</div>`;
+                    return;
+                }
+                
+                if (!data.length || data.every(row => row.tot === '-' && row.day === '-')) {
+                    resultsArea.innerHTML = `<div class="no-data">해당 날짜의 데이터가 없습니다.</div>`;
+                    return;
+                }
+
+                // 테이블 생성
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>시간</th><th>지역</th><th>총 쌓인 눈 (cm)</th><th>새로 내린 눈 (cm)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                // 데이터 그룹화 및 순서 조정 (140, 886 붙여서 출력)
+                for (let i = 0; i < data.length; i += 2) {
+                    const row140 = data[i]; // 군산 (140)
+                    const row886 = data[i+1]; // 군산산단 (886)
+                    
+                    if (row140.hour === row886.hour) {
+                        // 군산 140 출력
+                        tableHTML += `
+                            <tr>
+                                <td>${row140.hour}:00</td><td>${row140.name}</td><td>${row140.tot}</td><td>${row140.day}</td>
+                            </tr>
+                        `;
+                        // 군산산단 886 출력
+                        tableHTML += `
+                            <tr>
+                                <td>${row886.hour}:00</td><td>${row886.name}</td><td>${row886.tot}</td><td>${row886.day}</td>
+                            </tr>
+                        `;
+                    }
+                }
+
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                resultsArea.innerHTML = tableHTML;
+
+            } catch (error) {
+                spinner.style.display = 'none'; // 로딩바 숨김
+                console.error('Fetch error:', error);
+                resultsArea.innerHTML = `<div class="no-data">데이터를 불러오는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.</div>`;
+            }
+        }
+        
+        // 페이지 로드 시 자동 조회 방지 (버튼 클릭 기반으로 전환)
+        // window.onload = fetchData;
+    </script>
 </body>
 </html>
 """
 
-# API 통신 함수: requests timeout을 3초로 단축하여 웹 타임아웃 방지
-def fetch_single_data(tm):
-    url_tot = f"https://apihub.kma.go.kr/api/typ01/url/kma_snow1.php?sd=tot&tm={tm}&help=0&authKey={AUTH_KEY}"
-    url_day = f"https://apihub.kma.go.kr/api/typ01/url/kma_snow1.php?sd=day&tm={tm}&help=0&authKey={AUTH_KEY}"
-    res_dict = {stn: {'tot': '-', 'day': '-'} for stn in TARGET_STATIONS}
+# [개선된] API 통신 함수: 두 지점의 데이터를 한 번의 API 요청으로 처리
+def fetch_data_for_time(tm, sd):
+    url = f"https://apihub.kma.go.kr/api/typ01/url/kma_snow1.php?sd={sd}&tm={tm}&help=0&authKey={AUTH_KEY}"
+    res_data = {stn: '-' for stn in TARGET_STATIONS}
     
-    # [핵심 수정] 타임아웃을 3초로 설정
-    REQUEST_TIMEOUT = 3 
+    REQUEST_TIMEOUT = 5 # 넉넉하게 5초로 설정
     
     try:
-        rt = requests.get(url_tot, timeout=REQUEST_TIMEOUT).text
-        rd = requests.get(url_day, timeout=REQUEST_TIMEOUT).text
+        # verify=False로 SSL 오류 방지
+        response = requests.get(url, timeout=REQUEST_TIMEOUT, verify=False)
+        response.raise_for_status() # HTTP 오류 시 예외 발생
         
-        for line in rt.split('\n'):
+        data = response.text
+        
+        for line in data.split('\n'):
             if not line.startswith('#') and len(line.split(',')) > 2:
                 parts = line.split(',')
-                if parts[1].strip() in TARGET_STATIONS: res_dict[parts[1].strip()]['tot'] = parts[-2].strip()
-        for line in rd.split('\n'):
-            if not line.startswith('#') and len(line.split(',')) > 2:
-                parts = line.split(',')
-                if parts[1].strip() in TARGET_STATIONS: res_dict[parts[1].strip()]['day'] = parts[-2].strip()
-    except requests.exceptions.Timeout:
-        # API 응답 지연 시 '-' 반환
-        pass
-    except Exception:
-        # 기타 오류 발생 시 '-' 반환
+                stn = parts[1].strip()
+                if stn in TARGET_STATIONS: 
+                    # 데이터는 끝에서 두 번째 필드
+                    res_data[stn] = parts[-2].strip()
+                    
+    except requests.exceptions.RequestException as e:
+        # 타임아웃, 연결 오류, HTTP 오류 등 발생 시 모든 값 '-' 처리
+        print(f"API Request failed for {tm}, {sd}: {e}")
         pass
         
-    return tm[8:10], res_dict
+    return res_data
+
 
 @app.route('/')
-def index():
+def home():
+    """초기 접속 화면 (빈 화면 및 UI만 표시)"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    return render_template_string(HTML_TEMPLATE, today=today)
+
+@app.route('/api/snow')
+def get_snow_data():
+    """JS 요청에 따라 데이터를 가져오는 API 엔드포인트"""
+    target_date = request.args.get('date')
+    
+    if not target_date:
+        return jsonify({'error': '날짜(date) 매개변수가 필요합니다.'}), 400
+
     now = datetime.now()
-    today = now.strftime("%Y%m%d")
-    target_date = request.args.get('date', today)
+    today_str = now.strftime("%Y%m%d")
     
-    end_hour = now.hour if target_date == today else 23
-    hours = [f"{target_date}{h:02d}00" for h in range(end_hour + 1)]
+    try:
+        # 요청된 날짜가 오늘 날짜인 경우, 현재 시간까지만 조회
+        end_hour = now.hour if target_date == today_str else 23
+        hours = [f"{target_date}{h:02d}00" for h in range(end_hour + 1)]
+    except ValueError:
+        return jsonify({'error': '유효하지 않은 날짜 형식입니다.'}), 400
+
+    # 병렬 처리: 총적설(tot)과 신적설(day) 데이터를 한 번에 가져오기
+    results = {}
     
-    # [핵심 수정] 워커 수를 10개로 늘려 병렬 처리 속도 개선
-    with ThreadPoolExecutor(max_workers=10) as exec:
-        data = list(exec.map(fetch_single_data, hours))
+    # 24시간 전체 요청 시간 목록을 [time, time, ... ] 형태에서 [(time, 'tot'), (time, 'day'), ...] 형태로 확장
+    task_params = []
+    for h in hours:
+        task_params.append((h, 'tot'))
+        task_params.append((h, 'day'))
     
-    data.sort(key=lambda x: x[0])
-    
-    final_results = []
-    has_data = False
-    
-    for hour, res in data:
-        for stn in TARGET_STATIONS:
-            name = "군산" if stn == '140' else "군산산단"
-            result_tot = res[stn]['tot']
-            result_day = res[stn]['day']
+    # [성능 개선] API 요청 횟수를 줄이는 방식이므로, 워커 수는 4개 (Render의 CPU 코어 수)로 유지
+    with ThreadPoolExecutor(max_workers=4) as exec:
+        # 각 시간에 대해 tot, day 데이터를 병렬 요청
+        responses = list(exec.map(lambda p: (p[0], p[1], fetch_data_for_time(p[0], p[1])), task_params))
+        
+    # 결과를 시간(tm)과 지점(stn)별로 정리
+    combined_data = {}
+    for tm, sd, res_data in responses:
+        if tm not in combined_data:
+            combined_data[tm] = {'140': {'tot': '-', 'day': '-'}, '886': {'tot': '-', 'day': '-'}}
             
-            # 실제 값이 있다면 데이터 존재 플래그 설정
-            if result_tot != '-' or result_day != '-':
-                 has_data = True
-                 
-            final_results.append({'hour': hour, 'name': name, 'tot': result_tot, 'day': result_day})
+        for stn, val in res_data.items():
+            combined_data[tm][stn][sd] = val
+
+    final_results = []
     
-    # 데이터가 아예 없을 경우 (모두 '-') 빈 리스트 반환
-    if not has_data and all(r['tot'] == '-' and r['day'] == '-' for r in final_results):
-        final_results = None
+    # 데이터 정렬: 시간 순서로, 같은 시간 내에서는 140, 886 순서로 정렬
+    sorted_times = sorted(combined_data.keys())
+    
+    for tm in sorted_times:
+        hour = tm[8:10]
+        data_by_stn = combined_data[tm]
+        
+        # 140 (군산) 데이터 추가
+        final_results.append({
+            'hour': hour,
+            'name': '군산',
+            'tot': data_by_stn['140']['tot'],
+            'day': data_by_stn['140']['day']
+        })
+        
+        # 886 (군산산단) 데이터 추가
+        final_results.append({
+            'hour': hour,
+            'name': '군산산단',
+            'tot': data_by_stn['886']['tot'],
+            'day': data_by_stn['886']['day']
+        })
+    
+    return jsonify(final_results)
 
-    return render_template_string(HTML_TEMPLATE, results=final_results, today=target_date)
-
-# Gunicorn이 Render 환경에서 서버를 실행하므로, 아래 __name__ == '__main__' 블록은 실행되지 않습니다.
-# 테스트를 위해 로컬에서 돌릴 때만 사용됩니다.
 # if __name__ == '__main__':
 #     app.run(debug=True)
